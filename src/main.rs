@@ -5,23 +5,25 @@
 //! messages on progress/events to the UI
 //!
 
-use iced::{Application, Column, Command, Element, Settings, Subscription};
+use iced::{button, Application, Button, Column, Command, Element, Settings, Subscription, Text};
 use iced_futures::futures::channel::mpsc;
-
-use backend::{Backend, BackendMessage};
 
 pub fn main() {
     SubscriptionExample::run(Settings::default())
 }
 
-struct SubscriptionExample {
-    tx: Option<mpsc::Sender<BackendMessage>>,
-    backend: Backend,
+enum SubscriptionExample {
+    Loading,
+    Ready {
+        backend: mpsc::Sender<backend::Action>,
+        button: button::State,
+    },
 }
 
 #[derive(Debug, Clone)]
 enum Message {
-    BackendMsg(BackendMessage),
+    BackendMsg(backend::Message),
+    StartWorkA,
 }
 
 impl Application for SubscriptionExample {
@@ -29,10 +31,7 @@ impl Application for SubscriptionExample {
     type Message = Message;
 
     fn new() -> (SubscriptionExample, Command<Message>) {
-        let example = SubscriptionExample {
-            tx: None,
-            backend: Backend,
-        };
+        let example = SubscriptionExample::Loading;
         (example, Command::none())
     }
 
@@ -44,15 +43,29 @@ impl Application for SubscriptionExample {
         println!("Message: {:?}", message);
         match message {
             Message::BackendMsg(msg) => match msg {
-                BackendMessage::Tx(tx) => {
-                    self.tx = Some(tx);
-                    self.backend.start_work(self.tx.as_mut().unwrap());
+                backend::Message::Ready(tx) => {
+                    *self = SubscriptionExample::Ready {
+                        backend: tx,
+                        button: button::State::new(),
+                    };
                 }
-                BackendMessage::Msg1 => {
-                    self.backend.continue_work(self.tx.as_mut().unwrap());
+                backend::Message::WorkAStarted => { /* show progress in ui */ }
+                backend::Message::WorkADone => { /* show result in ui */ }
+                backend::Message::WorkBStarted => { /* show progress in ui */ }
+                backend::Message::WorkBDone => {
+                    /* show progress in ui*/
+                    println!("start cleaning up");
+                    if let SubscriptionExample::Ready { backend, .. } = self {
+                        backend.start_send(backend::Action::Cleanup).unwrap();
+                    }
                 }
-                _ => ()
+                _ => (),
             },
+            Message::StartWorkA => {
+                if let SubscriptionExample::Ready { backend, .. } = self {
+                    backend.start_send(backend::Action::StartWorkA).unwrap();
+                }
+            }
         }
         Command::none()
     }
@@ -63,7 +76,13 @@ impl Application for SubscriptionExample {
     }
 
     fn view(&mut self) -> Element<Message> {
-        Column::new().into()
+        if let SubscriptionExample::Ready { button, .. } = self {
+            Column::new()
+                .push(Button::new(button, Text::new("start A")).on_press(Message::StartWorkA))
+                .into()
+        } else {
+            Column::new().into()
+        }
     }
 }
 
@@ -72,28 +91,24 @@ mod backend {
     use iced_futures::futures::channel::mpsc;
 
     #[derive(Debug, Clone)]
-    pub enum BackendMessage {
-        Tx(mpsc::Sender<BackendMessage>),
-        Msg1,
-        Msg2,
-        Msg3,
+    pub enum Message {
+        Ready(mpsc::Sender<Action>),
+        WorkAStarted,
+        WorkADone,
+        WorkBStarted,
+        WorkBDone,
+        CleanUpStarted,
+        CleanUpFailed,
     }
 
-    pub struct Backend;
-
-    impl Backend {
-        pub fn start_work(&self, tx: &mut mpsc::Sender<BackendMessage>) {
-            println!("start something");
-            tx.start_send(BackendMessage::Msg1).ok();
-        }
-
-        pub fn continue_work(&self, tx: &mut mpsc::Sender<BackendMessage>) {
-            println!("continue something");
-            tx.start_send(BackendMessage::Msg2).ok();
-        }
+    #[derive(Debug, Clone)]
+    pub enum Action {
+        StartWorkA,
+        StartWorkB,
+        Cleanup,
     }
 
-    pub fn subscribe() -> iced::Subscription<BackendMessage> {
+    pub fn subscribe() -> iced::Subscription<Message> {
         iced::Subscription::from_recipe(BackendSubscription)
     }
 
@@ -103,7 +118,7 @@ mod backend {
     where
         H: std::hash::Hasher,
     {
-        type Output = BackendMessage;
+        type Output = Message;
 
         fn hash(&self, state: &mut H) {
             use std::hash::Hash;
@@ -116,11 +131,22 @@ mod backend {
         ) -> futures::stream::BoxStream<'static, Self::Output> {
             use futures::stream::StreamExt;
 
-            let (mut tx, rx) = mpsc::channel(1);
-            let msg = BackendMessage::Tx(tx.clone());
-            tx.start_send(msg).ok();
+            let (tx, rx) = mpsc::channel(1);
 
-            rx.boxed()
+            futures::stream::once(async { Message::Ready(tx) })
+                .chain(rx.map(|action| {
+                    match action {
+                        Action::StartWorkA => {
+                            /* how to actually start work,
+                            immediately return `Message::WorkAStarted`?
+                            and the result of `A` later? */
+                            Message::WorkAStarted
+                        }
+                        Action::StartWorkB => Message::WorkBStarted,
+                        Action::Cleanup => Message::CleanUpStarted,
+                    }
+                }))
+                .boxed()
         }
     }
 }
